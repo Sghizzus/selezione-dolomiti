@@ -371,14 +371,12 @@ baked_data <- baked_data |>
   rename_with(function(x) {
     c("t", "y", "censored", "CR", "MT", "MLB", "MLR", "SI", "SIU", "T")
   })
-``
-`
+```
 Ho trasformato la data inizio in numerico espresso in settimane, più comodo per lo sviluppo del modello. Per coerenza ho trasformato in settimane decimali anche il tempo tra una telefonata arrivata e la successiva. Ho trasformato la codifica in variabili dummies 0/1 che facilitano anch'essi il fitting del modello. Trasformato anche censored in 0/1.
 
 ## Scrittura modello stan e fitting
 
-`
-``
+```
 {
   r
 }
@@ -446,14 +444,6 @@ coef <- tbl(con, "draws") |>
 q <- coef[1:7]
 a <- coef[8:11]
 b <- coef[12:15]
-`
-`
-`
-`
-``
-{
-  r
-}
 
 baked_data |>
   mutate(
