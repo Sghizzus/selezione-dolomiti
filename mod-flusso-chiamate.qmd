@@ -1,0 +1,473 @@
+---
+title: "Modello flusso chiamate Dolomiti Energia"
+format: html
+date: 2025-09-10
+---
+
+## Premessa
+
+Devo prevedere i flussi di chiamate in ingresso per il mese di ottobre. Nella consegna ci sono alcune informazioni che risultano apparentemente inutili, come per esempio che per la seconda metà di ottobre è prevista una campagna di marketing. Non sembra rilevante
+
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(janitor)
+library(recipes)
+library(cmdstanr)
+library(DBI)
+library(duckdb)
+```
+
+## Analisi dati esplorativa
+
+```{r}
+
+data <- read_csv2(Sys.getenv("DATA_PATH"))
+```
+
+```{r}
+
+data <- data |>
+  clean_names() |>
+  mutate(
+    across(data_inizio:data_di_fine, dmy_hm),
+    across(durata_totale:durata_conversazione, ~ . / 1000)
+  ) |>
+  arrange(data_inizio)
+```
+
+```{r}
+
+time_series <- data |>
+  mutate(
+    giorno = day(data_inizio),
+    ora = hour(data_inizio)
+  ) |>
+  right_join(
+    expand_grid(
+      giorno = 1:31,
+      ora = 0:23
+    ),
+    join_by(giorno, ora)
+  ) |>
+  mutate(
+    t = ymd_hm(str_glue("2024-10-{giorno} {ora}:00"))
+  ) |>
+  group_by(t) |>
+  summarise(
+    n = sum(!is.na(data_inizio))
+  )
+
+
+```
+
+```{r}
+
+time_series |>
+  ggplot(aes(t, n / 3600)) +
+  geom_line()
+```
+
+```{r}
+periodogram <- time_series |>
+  pull(n) |>
+  ts(deltat = 1) |>
+  spectrum(
+    detrend = FALSE,
+    spans = 27
+  )
+```
+
+```{r}
+
+fourier <- fft(time_series$n)
+fourier <- sqrt(Re(fourier)^2 + Im(fourier)^2)
+
+
+plot(0:743, fourier / fourier[1])
+
+which(fourier > 0.2 * fourier[1]) - 1
+
+# ogni 7.75 giorni
+# quotidianamente
+# ogni 12 ore
+# ogni 8 ore
+```
+
+```{r}
+
+tibble(
+  freq = periodogram$freq,
+  spec = periodogram$spec
+) |>
+  mutate(
+    period = 1 / freq,
+    spec = spec / first(spec)
+  ) |>
+  arrange(desc(spec)) |>
+  ggplot(aes(freq, spec)) +
+  geom_line() +
+  geom_hline(yintercept = 0.05) +
+  geom_vline(xintercept = 1 / 24 / 7) +
+  geom_vline(xintercept = 1 / 24) +
+  geom_vline(xintercept = 1 / 12) +
+  geom_vline(xintercept = 1 / 8)
+```
+
+```{r}
+tibble(
+  freq = periodogram$freq,
+  spec = periodogram$spec
+) |>
+  mutate(
+    period = 1 / freq,
+    spec = spec / first(spec)
+  ) |>
+  arrange(desc(spec))
+```
+
+```{r}
+
+# media_mobile_inversa <- function(t0, t, x, w = NULL) {
+#   if (is.null(w)) {
+#     w <- int_length(int_diff(range(t))) / sqrt(length(x))
+#   }
+
+#   x <- x[abs(t - t0) < w]
+
+#   1 / mean(x)
+# }
+```
+
+```{r}
+
+# data <- data |>
+#   group_by(codifica) |>
+#   mutate(
+#     tempo_chiamata_successiva = data_inizio |>
+#       c(ymd("2024-11-01")) |>
+#       int_diff() |>
+#       int_length(),
+#     censored = row_number() == n()
+#   )
+```
+
+```{r}
+# data |>
+#   mutate(
+#     t = round_date(data_inizio, "hour")
+#   ) |>
+#   count(t) |>
+#   mutate(
+#     flusso = n / 3600
+#   ) |>
+#   ggplot(aes(t, flusso, color = codifica)) +
+#   geom_line()
+```
+
+```{r}
+
+# data |>
+#   mutate(
+#     t = hour(data_inizio)
+#   ) |>
+#   count(t) |>
+#   mutate(
+#     flusso = n / 3600
+#   ) |>
+#   ggplot(aes(t, flusso, color = codifica)) +
+#   geom_line()
+```
+
+```{r}
+
+# fourier <- data |>
+#   mutate(
+#     t = hour(data_inizio)
+#   ) |>
+#   count(t) |>
+#   mutate(
+#     flusso = n / 3600
+#   ) |>
+#   filter(codifica == "Mercato Libero Retail") |>
+#   pull(flusso) |>
+#   fft()
+
+# fourier <- sqrt(Re(fourier)^2 + Im(fourier)^2)
+# plot(seq_along(fourier), fourier / fourier[1])
+# abline(a = 0.2, b = 0)
+```
+
+```{r}
+
+# data |>
+#   mutate(
+#     t = day(data_inizio)
+#   ) |>
+#   count(t) |>
+#   mutate(
+#     flusso = n / 3600 / 24
+#   ) |>
+#   ggplot(aes(t, flusso, color = codifica)) +
+#   geom_line()
+```
+
+```{r}
+
+# data |>
+#   mutate(
+#     t = wday(data_inizio, label = TRUE)
+#   ) |>
+#   count(t) |>
+#   mutate(
+#     flusso = n / 3600 / 24 / 4
+#   ) |>
+#   ggplot(aes(t, flusso, color = codifica)) +
+#   geom_line(aes(group = codifica))
+```
+
+```{r}
+
+# fourier <- data |>
+#   mutate(
+#     t = wday(data_inizio, label = TRUE)
+#   ) |>
+#   count(t) |>
+#   mutate(
+#     flusso = n / 3600 / 24 / 4
+#   ) |>
+#   filter(codifica == "Mercato Libero Retail") |>
+#   pull(flusso) |>
+#   fft()
+
+# fourier <- sqrt(Re(fourier)^2 + Im(fourier)^2)
+# plot(seq_along(fourier), fourier / fourier[1])
+# abline(a = 0.2, b = 0)
+
+```
+
+```{r}
+
+# stima_flusso <- tibble(
+#   t = seq(
+#     ymd_hm("2024-10-01 00:00"),
+#     ymd_hm("2024-11-01 00:00"),
+#     length.out = 1000
+#   )
+# ) |>
+#   mutate(
+#     stima_flusso = map(t, \(x) {
+#       data |>
+#         filter(!censored) |>
+#         summarise(
+#           flusso = media_mobile_inversa(
+#             x,
+#             data_inizio,
+#             tempo_chiamata_successiva
+#           )
+#         )
+#     })
+#   ) |>
+#   unnest(stima_flusso)
+```
+
+```{r}
+
+# stima_flusso |>
+#   ggplot(aes(t, flusso, color = codifica)) +
+#   geom_line() +
+#   scale_color_viridis_d()
+```
+
+```{r}
+
+# lm(flusso ~ t + codifica, data = stima_flusso) |>
+#   anova()
+```
+
+Ho fatto un po' di analisi esplorativa. Ciò che risulta evidente è che l'intensità del flusso di chiamate cambia notevolmente dalla codifica che è la linea telefonica contattata dal cliente. Piuttosto che applicare un modello diverso per ogni codifica potrebbe essere più opportuno aggiungere la codifica come variabile additiva. Bisogna creare delle variabili dummy da introdurre nel modello. Per quanto riguarda le influenze temporali non sembra essere evidente un trend. Probabilmente il trend si può osservare su una finestra temporale più ampia. Potrebbe essere trend o semplice una stagionalità più lunga, con periodo annuale per esempio. Probabilmente possiamo evitare di modellarlo in questa fase, data l'assenza evidente di un trend. La stagionalità osservata che si nota è quotidiana e settimanale. In realtà, più che quotidiana sembrerebbe semiquotodiana e sembrerebbe esserci anche una componente triquotidiana significativa. Mettiamo tutte e quattro queste frequenze. Pertanto il predictor sarà della forma
+
+$$
+e^{q_c +
+ a_1 cos(\omega t) +  b_1 sin(\omega t) +
+   a_2 cos(7\omega t) + b_2 sin(7\omega t) +
+   a_3 cos(14\omega t) + b_3 sin(14\omega t) +
+   a_3 cos(21\omega t) + b_3 sin(21\omega t)}
+$$
+
+Dove $q_c$ è una costante additiva che dipende dalla codifica $c$ e $\omega = 2\pi/604800$ è la frequenza settimanale dato che il tempo è espresso in secondi.
+
+## Modello
+
+Modellerò il flusso di dati tramite un processo di Poisson non omogeneo. Questo significa che dati $t_0$ e $t_1$, si ha che
+
+$$
+X_{t_0, t_1, c} \sim \mathcal{P}(\Lambda(t_0, t_1, c))
+$$
+
+dove $X_{t_0, t_1, c}$ è il numero di chiamate in ingresso nell'intervallo temporale $(t_0, t_1)$ e $c$ è la codifica delle chiamate, mentre $\Lambda$ è dato da
+
+$$
+\Lambda(t_0, t_1, c) = \int_{t_0}^{t_1} \lambda(t, c) dt
+$$
+
+e
+
+$$
+\lambda(t, c) = e^{q_c +
+ a_1 cos(\omega t) +  b_1 sin(\omega t) +
+   a_2 cos(7\omega t) + b_2 sin(7\omega t) +
+   a_3 cos(14\omega t) + b_3 sin(14\omega t) +
+   a_3 cos(21\omega t) + b_3 sin(21\omega t)}
+$$
+
+Ne deriva che dato il tempo attuale t_0, la distribuzione del tempo $T$ per la chiamata successiva segue la distribuzione
+
+$$
+f(t|t_0, c) = \lambda(t,c) e^{-\Lambda(t_0, t, c)}
+$$
+
+## Prior
+
+Come prior utilizzerò una semplice normale di media 0 con varianza 25 per ciascuna variabile da stimare, tutte indipendenti tra di loro. Dovrebbe essere sufficientemente vaga.
+
+## Preprocessing
+
+Ho eseguito parte del preprocessing in fase di EDA. In particolare ho già calcolato i tempi tra una telefonata in ingresso e l'altra, segnandomi che gli ultimi dati sono censurati.
+```{r}
+
+data <- data |>
+  group_by(codifica) |>
+  mutate(
+    tempo_chiamata_successiva = data_inizio |>
+      c(ymd("2024-11-01")) |>
+      int_diff() |>
+      int_length(),
+    censored = row_number() == n()
+  )
+```
+
+```{r}
+data <- data |>
+  ungroup() |>
+  select(codifica, data_inizio, tempo_chiamata_successiva, censored)
+```
+
+```{r}
+ricetta <- recipe(~., data) |>
+  step_mutate(
+    data_inizio = unclass(data_inizio) / 3600,
+    tempo_chiamata_successiva = tempo_chiamata_successiva / 3600,
+    censored = as.integer(censored)
+  ) |>
+  step_dummy(codifica) |>
+  step_center(data_inizio) |>
+  prep(training = data)
+
+baked_data <- bake(ricetta, data)
+
+baked_data <- baked_data |>
+  rename_with(function(x) {
+    c("t", "y", "censored", "CR", "MT", "MLB", "MLR", "SI", "SIU", "T")
+  })
+``
+`
+Ho trasformato la data inizio in numerico espresso in settimane, più comodo per lo sviluppo del modello. Per coerenza ho trasformato in settimane decimali anche il tempo tra una telefonata arrivata e la successiva. Ho trasformato la codifica in variabili dummies 0/1 che facilitano anch'essi il fitting del modello. Trasformato anche censored in 0/1.
+
+## Scrittura modello stan e fitting
+
+```{r}
+
+mod <- cmdstan_model("non-homogeneous-poisson.stan", compile = FALSE)
+mod$check_syntax()
+mod$compile()
+```
+
+```{r}
+
+fit <- mod$sample(
+  c(
+    N = nrow(baked_data),
+    baked_data
+  ),
+  123,
+  parallel_chains = 4,
+  iter_warmup = 2500,
+  iter_sampling = 2500,
+  refresh = 1
+)
+```
+
+```{r}
+# fit$save_object("fit.rds")
+```
+
+```{r}
+
+fit$summary(c("q", "a", "b"))
+```
+
+```{r}
+
+draws <- fit$draws(c("q", "a", "b"), format = "df")
+```
+
+```{r}
+
+draws <- draws |> 
+  as_tibble() |> 
+  clean_names()
+```
+
+```{r}
+con <- dbConnect(duckdb(), dbdir = "draws_db")
+```
+
+```{r}
+
+# dbWriteTable(con, "draws", draws)
+```
+
+```{r}
+
+coef <- tbl(con, "draws") |> 
+  summarise(across(!chain:draw, mean)) |> 
+  pivot_longer(everything()) |> 
+  pull(value)
+```
+
+```{r}
+
+q <- coef[1:7]
+a <- coef[8:11]
+b <- coef[12:15]
+`
+``
+```{r}
+
+baked_data |>
+  mutate(
+    lambda = exp(
+      CR *
+        q[1] +
+        MT * q[2] +
+        MLB * q[3] +
+        MLR * q[4] +
+        SI * q[5] +
+        SIU * q[6] +
+        `T` * q[7] +
+        a[1] * cos(2 * pi / 7 / 24 * t) +
+        b[1] * cos(2 * pi / 7 / 24 * t) +
+        a[2] * cos(2 * pi / 24 * t) +
+        b[2] * cos(2 * pi / 24 * t) +
+        a[3] * cos(2 * pi / 12 * t) +
+        b[3] * cos(2 * pi / 12 * t) +
+        a[4] * cos(2 * pi / 8 * t) +
+        b[4] * cos(2 * pi / 8 * t)
+    )
+  ) |>
+  filter(MT == 1) |>
+  ggplot(aes(t, lambda)) +
+  geom_line()
+```
