@@ -471,3 +471,4 @@ baked_data |>
   ggplot(aes(t, lambda)) +
   geom_line()
 ```
+
