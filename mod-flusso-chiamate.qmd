@@ -87,7 +87,7 @@ fourier <- sqrt(Re(fourier)^2 + Im(fourier)^2)
 
 plot(0:743, fourier / fourier[1])
 
-which(fourier > 0.2 * fourier[1]) - 1
+31 * 24 / (which(fourier > 0.2 * fourier[1]) - 1)
 
 # ogni 7.75 giorni
 # quotidianamente
@@ -377,7 +377,11 @@ Ho trasformato la data inizio in numerico espresso in settimane, più comodo per
 
 ## Scrittura modello stan e fitting
 
-```{r}
+`
+``
+{
+  r
+}
 
 mod <- cmdstan_model("non-homogeneous-poisson.stan", compile = FALSE)
 mod$check_syntax()
@@ -415,8 +419,8 @@ draws <- fit$draws(c("q", "a", "b"), format = "df")
 
 ```{r}
 
-draws <- draws |> 
-  as_tibble() |> 
+draws <- draws |>
+  as_tibble() |>
   clean_names()
 ```
 
@@ -431,9 +435,9 @@ con <- dbConnect(duckdb(), dbdir = "draws_db")
 
 ```{r}
 
-coef <- tbl(con, "draws") |> 
-  summarise(across(!chain:draw, mean)) |> 
-  pivot_longer(everything()) |> 
+coef <- tbl(con, "draws") |>
+  summarise(across(!chain:draw, mean)) |>
+  pivot_longer(everything()) |>
   pull(value)
 ```
 
@@ -443,8 +447,13 @@ q <- coef[1:7]
 a <- coef[8:11]
 b <- coef[12:15]
 `
+`
+`
+`
 ``
-```{r}
+{
+  r
+}
 
 baked_data |>
   mutate(

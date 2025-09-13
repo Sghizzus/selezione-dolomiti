@@ -1,0 +1,555 @@
+---
+title: "Business case"
+format: 
+    revealjs: default
+    pptx: default
+date: 2025-09-13
+lang: it
+execute:
+    echo: false
+    warning: false
+    message: false
+fig-width: 6
+fig-asp: 0.618
+fig-align: center
+embed-resources: true
+knitr:
+    opts_chunk:
+        out-width: 70%
+---
+
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(janitor)
+library(recipes)
+library(gt)
+library(DBI)
+library(duckdb)
+library(bayestestR)
+library(mirai)
+```
+
+```{r}
+data <- read_csv2(Sys.getenv("DATA_PATH")) |>
+  clean_names() |>
+  mutate(
+    across(data_inizio:data_di_fine, dmy_hm),
+    across(durata_totale:durata_conversazione, ~ . / 1000)
+  ) |>
+  arrange(data_inizio) |>
+  group_by(codifica) |>
+  mutate(
+    tempo_chiamata_successiva = data_inizio |>
+      c(ymd("2024-11-01")) |>
+      int_diff() |>
+      int_length(),
+    censored = row_number() == n()
+  ) |>
+  ungroup() |>
+  select(codifica, data_inizio, tempo_chiamata_successiva, censored)
+```
+
+# EDA
+
+## Chiamate suddivise per ora
+
+Per ogni ora di ottobre ho contato il numero di chiamate in ingresso suddividendo per `codifica`
+
+```{r}
+
+chiamate_per_ora <- data |>
+  mutate(
+    giorno = day(data_inizio),
+    ora = hour(data_inizio)
+  ) |>
+  right_join(
+    expand_grid(
+      giorno = 1:31,
+      ora = 0:23,
+      codifica = c(
+        "CreditoBusiness",
+        "Mercato Libero Retail",
+        "CreditoRetail",
+        "Servizio Igiene Urbana",
+        "Mercato Libero Business",
+        "Maggior Tutela",
+        "Servizio Idrico",
+        "Teleseller"
+      )
+    ),
+    join_by(giorno, ora, codifica)
+  ) |>
+  mutate(
+    t = ymd_hm(str_glue("2024-10-{giorno} {ora}:00"))
+  ) |>
+  group_by(t, codifica) |>
+  summarise(
+    n = sum(!is.na(data_inizio))
+  )
+```
+
+```{r}
+
+chiamate_per_ora |>
+  ggplot(aes(t, n)) +
+  geom_line() +
+  facet_wrap(~codifica) +
+  labs(x = "Tempo", y = "Numero di chiamate in ingresso")
+```
+
+## Analisi terzi di giornata
+
+Non sembrerebbe presente una periodicità ogni 8 ore per tutte le codifiche, tuttavia potrebbe essere utile considerarla nel modello per coprire i casi in cui la componente parrebbe essere significativa (Mercato Libero Retail)
+
+```{r}
+
+chiamate_per_ora |>
+  group_by(codifica) |>
+  mutate(
+    ora = hour(t),
+    ora_resid = ora %% 8,
+    ora_quotient = ora %/% 8,
+    gruppo = str_c(day(t), "-", ora_quotient)
+  ) |>
+  ggplot(aes(ora_resid, n)) +
+  geom_line(aes(group = gruppo), alpha = 0.5) +
+  facet_wrap(~codifica) +
+  geom_smooth() +
+  labs(x = "Ora", y = "Numero di telefonate in ingresso")
+```
+
+## Analisi mezzi di giornata
+
+Applicando la trasformazione $\Delta_8 Y_t = Y_t - Y_{t - 8}$ si rimuove la periodicità con periodo di 8 ore, permettendoci di vedere più facilmente altre periodicità nei dati.
+
+```{r}
+
+chiamate_per_ora |>
+  group_by(codifica) |>
+  mutate(
+    n = c(rep(NA, 8), diff(n, lag = 8)),
+    ora = hour(t),
+    ora_resid = ora %% 12,
+    ora_quotient = ora %/% 12,
+    gruppo = str_c(day(t), "-", ora_quotient)
+  ) |>
+  ggplot(aes(ora_resid, n)) +
+  geom_line(aes(group = gruppo), alpha = 0.5) +
+  facet_wrap(~codifica) +
+  geom_smooth() +
+  labs(x = "Ora", y = quote(Delta[8] * Y[t]))
+```
+
+Anche in questo caso questa periodicità non sembra ugualmente diffusa tra tutte le codifiche, ma risulta utile includerla nel modello.
+
+## Analisi giornaliera
+
+Applicando la stessa tecnica di prima, possiamo rimuovere le componenti periodiche con periodo di 12 ore.
+
+```{r}
+
+chiamate_per_ora |>
+  group_by(codifica) |>
+  mutate(
+    n = c(rep(NA, 8), diff(n, lag = 8)),
+    n = c(rep(NA, 12), diff(n, lag = 12)),
+    ora = hour(t),
+    giorno = day(t)
+  ) |>
+  ggplot(aes(ora, n)) +
+  geom_line(aes(group = giorno), alpha = 0.5) +
+  facet_wrap(~codifica) +
+  geom_smooth() +
+  labs(x = "Ora", y = quote(Delta[12] * Delta[8] * Y[t]))
+```
+
+Anche in questo caso risulta evidente una componente giornaliera.
+
+## Analisi settimanale
+
+```{r}
+chiamate_per_ora |>
+  group_by(codifica) |>
+  mutate(
+    n = c(rep(NA, 8), diff(n, lag = 8)),
+    n = c(rep(NA, 12), diff(n, lag = 12)),
+    n = c(rep(NA, 24), diff(n, lag = 24)),
+    giorno = day(t),
+    giorno_label = wday(t, label = TRUE),
+    settimana = week(t),
+    giorno = giorno %% 7 + 1,
+    modified_t = ymd_h(str_glue("2024-10-{giorno} {hour(t)}"))
+  ) |>
+  ggplot(aes(modified_t, n)) +
+  geom_line(aes(group = settimana), alpha = 0.5) +
+  facet_wrap(~codifica) +
+  geom_smooth() +
+  labs(
+    x = "Giorno/Ora della settimana",
+    y = quote(Delta[24] * Delta[12] * Delta[8] * Y[t])
+  )
+```
+
+## Analisi del trend
+
+Rimuovendo anche la componente settimanale ci rimane da analizzare la presenza di un qualche trend.
+
+```{r}
+
+chiamate_per_ora |>
+  group_by(codifica) |>
+  mutate(
+    n = c(rep(NA, 8), diff(n, lag = 8)),
+    n = c(rep(NA, 12), diff(n, lag = 12)),
+    n = c(rep(NA, 24), diff(n, lag = 24)),
+    n = c(rep(NA, 168), diff(n, lag = 168))
+  ) |>
+  ggplot(aes(t, n)) +
+  geom_line() +
+  facet_wrap(~codifica) +
+  geom_smooth() +
+  labs(
+    x = "Tempo",
+    y = quote(Delta[168] * Delta[24] * Delta[12] * Delta[8] * Y[t])
+  )
+```
+
+Non risulta apparente la presenza di un trend. E' rimasto solo rumore.
+
+## Conclusioni EDA {.scrollable}
+
+-   La portata dei flussi è sicuramente globalmente influenzata dalla codifica delle chiamate
+-   Stagionalità osservate con periodo:
+    -   8 ore
+    -   12 ore
+    -   giornaliera
+    -   settimanale
+-   La stagionalità a prima vista non sembrerebbe ugualmente diffusa, ma potrebbe essere presente con intensità proporzionale alla portata complessiva dei flussi della codifica, rendnedola più difficile da osservare nei gruppi con flussi globali inferiori.
+-   Non risulta evidente la presenza di un trend
+
+# Formalizzazione modello
+
+## Componente deterministica
+
+Proposta di modello per il flusso di chiamate:
+$$
+\begin{align}
+\lambda(c, t) &= e^{q_c + \sum_{i=0}^4 a_i \cos(\omega_i t) + b_i \sin(\omega_i t)} \\
+&= e^{q_c}e^{\sum_{i=0}^4 a_i \cos(\omega_i t) + b_i \sin(\omega_i t)}
+\end{align}
+$$
+
+-   $c$ rappresenta la codifica e $q_c$ è quindi una costante additiva che dipende da $c$. Regolano il flusso globale della codifica.
+-   $\omega_i = 2 \pi / T_i$ con $T_i = 8, 12, 24, 168$ rispecchiando i periodi osservati durante l'EDA
+
+## Modello
+
+Processo di Poisson non omogeneo con tasso $\lambda(c, t)$: 
+$$
+x_t|c \sim PP(\lambda(c, t))
+$$
+
+Ciò implica che dato un intervallo temporale $(t_0, t_1)$ il numero $Y_{t_0, t_1}$ di chiamate in ingresso segue la distribuzione:
+
+$$
+    Y_{t_0, t_1}|c \sim \mathcal{P}(\Lambda(c, t_0, t_1)), \quad \Lambda(c, t_0, t_1) = \int_{t_0}^{t_1} \lambda(c, t) dt
+$$
+
+------------------------------------------------------------------------
+
+Inoltre dato il tempo corrente $s$ il tempo $T|c, s$ per l'arrivo della prossima chiamata segue la distribuzione:
+$$
+    f(t|c, s) = \lambda(c, s + t) e^{-\Lambda(c, s, s + t)}
+$$
+
+## Approccio bayesiano: distribuzione a priori
+
+Ho seguito un approccio bayesiano, pertanto ho posto una distribuzione a priori per tutti i parametri $q_c, a_i, b_i$ da stimare nel modello. In particolare ho posto una distribuzione a priori normale di media $0$ e varianza $0.0784$. 
+$$
+q_c, a_i, b_i \sim \mathcal{N}(0, 0.0784)
+$$
+
+# Fitting del modello
+
+## Preprocessing dei dati {.scrollable}
+
+-   Il modo migliore per estrarre più informazione possibile dal dataset è quello di calcolare per ogni codifica il tempo che intercorre tra ogni chiamata in arrivo espresso in ore per comodità
+-   Per non perdermi niente ho tenuto nel dataset anche il tempo tra l'ultima chiamata del 31 ottobre e la fine della giornata e ho aggiunto una colonna per tenermi traccia se il tempo registrato fosse censurato o meno
+-   Ho dato a ciascuna codifica una sua colonna dedicata
+-   Ho centrato il tempo espresso in ore in modo che avesse media 0
+
+```{r}
+ricetta <- recipe(~., data) |>
+  step_mutate(
+    data_inizio = unclass(data_inizio) / 3600,
+    tempo_chiamata_successiva = tempo_chiamata_successiva / 3600,
+    censored = as.integer(censored)
+  ) |>
+  step_dummy(codifica) |>
+  step_center(data_inizio) |>
+  prep(training = data)
+
+baked_data <- bake(ricetta, data)
+
+baked_data <- baked_data |>
+  rename_with(function(x) {
+    c("t", "y", "censored", "CR", "MT", "MLB", "MLR", "SI", "SIU", "T")
+  })
+
+baked_data |>
+  gt() |>
+  fmt_number(t:y) |>
+  opt_stylize() |>
+  opt_interactive()
+```
+
+::: callout-warning
+
+## Attenzione!
+Purtroppo a causa di una svista durante l'analisi ho involontariamente ignorato i dati del CreditoBusinness. Fortunatamente costituiscono meno dell'1% dei dati e non dovrebbe aver impattato significativamente sulla corretta stima dei parametri. Non ho rieseguito l'analisi corretta a causa dei tempi particolarmente lunghi per l'esecuzione dell'algoritmo (6/7 ore)
+:::
+
+## Flusso medio per codifica
+
+```{r}
+
+con <- dbConnect(duckdb(), dbdir = "draws_db")
+```
+
+```{r}
+
+tbl(con, "draws") |>
+  summarise(across(starts_with("q"), ~ mean(exp(.), na.rm = TRUE))) |>
+  pivot_longer(everything()) |>
+  collect() |>
+  mutate(
+    name = c(
+      "CreditoRetail",
+      "Maggior Tutela",
+      "Mercato Libero Business",
+      "Mercato Libero Retail",
+      "Servizio Idrico",
+      "Servizio Igiene Urbana",
+      "Teleseller"
+    )
+  ) |>
+  mutate(
+    name = fct_reorder(name, value)
+  ) |>
+  ggplot(aes(name, value)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = "Codifica", y = "Tasso orario medio di chiamate")
+```
+
+## Ampiezza delle componenti stagionali
+
+```{r}
+
+tbl(con, "draws") |>
+  select(matches("^a|b")) |>
+  collect() |>
+  pivot_longer(
+    everything(),
+    names_to = c(".value", "componente"),
+    names_pattern = "(a|b)_(\\d)"
+  ) |>
+  group_by(componente) |>
+  summarise(
+    A = mean(sqrt(a^2 + b^2))
+  ) |>
+  mutate(
+    componente = fct_recode(
+      componente,
+      Settimanale = "1",
+      Giornaliera = "2",
+      "Ogni 12 ore" = "3",
+      "Ogni 8 ore" = "4"
+    ) |>
+      fct_reorder(A)
+  ) |>
+  ggplot(aes(componente, A)) +
+  geom_col() +
+  labs(x = "Frequenza", y = "Ampiezza stimata")
+```
+
+## Previsione del flusso di ottobre
+
+```{r}
+
+predict <- function(t_0, t_1, codifica, draws) {
+  lambda <- function(t, codifica, q, a, b) {
+    index <- match(
+      codifica,
+      c(
+        "CreditoRetail",
+        "Maggior Tutela",
+        "Mercato Libero Business",
+        "Mercato Libero Retail",
+        "Servizio Idrico",
+        "Servizio Igiene Urbana",
+        "Teleseller"
+      )
+    )
+
+    omega <- 2 * pi / 24 / 7 * c(1, 7, 14, 21)
+    q <- q[index]
+
+    purrr::map_dbl(t, ~ exp(q + a %*% cos(omega * .) + b %*% sin(omega * .)))
+  }
+
+  x <- Lambda <- double(nrow(draws))
+
+  for (i in seq_along(x)) {
+    Lambda[i] <- integrate(
+      lambda,
+      t_0,
+      t_1,
+      codifica = codifica,
+      q = draws[i, paste0("q_", 1:7)],
+      a = draws[i, paste0("a_", 1:4)],
+      b = draws[i, paste0("b_", 1:4)]
+    )$value
+
+    x[i] <- rpois(1, Lambda[i])
+  }
+
+  pred <- mean(Lambda)
+  intervallo <- bayestestR::hdi(x)
+  lower <- intervallo$CI_low
+  upper <- intervallo$CI_high
+
+  list(
+    pred = pred,
+    lower = lower,
+    upper = upper
+  )
+}
+```
+
+```{r}
+draws <- tbl(con, "draws") |>
+  collect()
+
+dbDisconnect(con)
+
+matrix_draws <- draws |>
+  as.matrix()
+```
+
+```{r}
+
+center <- data |>
+  pull(data_inizio) |>
+  unclass() |>
+  mean()
+```
+
+```{r}
+
+# grid <- chiamate_per_ora |>
+#   mutate(
+#     decimal_t = (unclass(t) - center) / 3600
+#   ) |>
+#   filter(codifica != "CreditoBusiness") |>
+#   ungroup() |>
+#   filter(t < ymd("2024-10-08"))
+
+# daemons(6)
+
+# grid <- grid |>
+#     mutate(
+#         data = map2(
+#             decimal_t,
+#             codifica,
+#             in_parallel(\(t, c) predict(t, t + 1, c, matrix_draws), matrix_draws = matrix_draws, predict = predict, lambda = lambda),
+#              .progress = TRUE
+#              )
+#     )
+
+# daemons(0)
+
+# grid <- grid |>
+#     unnest_wider(data)
+
+# write_rds(grid, "grid.rds")
+
+grid <- read_rds("grid.rds")
+
+grid <- grid |>
+  mutate(
+    ora = hour(t),
+    giorno = day(t)
+  ) |>
+  select(-n, -decimal_t, -t)
+```
+
+```{r}
+
+pred <- chiamate_per_ora |>
+  mutate(
+    decimal_t = (unclass(t) - center) / 3600
+  ) |>
+  filter(codifica != "CreditoBusiness") |>
+  ungroup() |>
+  mutate(
+    ora = hour(t),
+    giorno = (day(t) - 1) %% 7 + 1
+  ) |>
+  left_join(grid, join_by(codifica, ora, giorno))
+```
+
+```{r}
+#| fig-width: 10
+
+pred |>
+  group_by(codifica) |>
+  mutate(
+    ora = hour(t),
+    giorno = day(t),
+    giorno_della_settimana = wday(t, label = TRUE, week_start = 1),
+  ) |>
+  ggplot(aes(ora, n, group = giorno)) +
+  geom_ribbon(
+    data = ~ . |> filter(t < ymd("2024-10-08")),
+    aes(ymin = lower, ymax = upper),
+    fill = "grey60",
+    alpha = 0.4
+  ) +
+  geom_line(alpha = 0.5) +
+  geom_line(
+    data = ~ . |> filter(t < ymd("2024-10-08")),
+    aes(y = pred, group = str_c(giorno_della_settimana, codifica)),
+    color = "#3366FF",
+    linewidth = 1
+  ) +
+  facet_grid(codifica ~ giorno_della_settimana) +
+  labs(x = "Ora", y = "Numero chiamate")
+```
+
+## Performance
+
+```{r}
+
+concordance <- pred |>
+  summarise(concordance = mean(between(n, lower, upper))) |>
+  pull(concordance)
+```
+
+La previsione sembra seguire abbastanza bene l'andamento complessivo dei dati ma è ancora molto impreciso. Infatti i dati osservati finiscono all'interno dell'intervallo di confidenza al 95% solo il `{r} scales::percent(concordance)` dei casi. Ciò consiglia che il modello non è abbastanza flessibile da rappresentare adeguatamente l'andamento dei dati.
+
+## Come migliorare il modello
+
+* Rieseguire l'analisi includendo la codifica mancante
+* Analizzare separatamente e indipendentemente le diverse codifiche, in modo da avere le ampiezze delle componenti stagionali potenzialmente variabili tra le diverse codifiche
+* Aggiungere ulteriori componenti stagionali con frequenza più elevata
+* Condurre l'analisi basandosi sul numero di chiamate per ora invece che sui tempi intercorsi tra una telefonata e la successiva
+
+# Come sfruttare il modello {.smaller}
+
+Una volta ottenuto un modello soddisfacentte per le chiamate in ingresso si può passare a modellare i tempi di evasione della chiamata. Nel dataset fornito c'è la colonna `Durata conversazione` che potrebbe essere utile a questo scopo, differenziando potenzialmente l'analisi tra i diversi valori di `GESTIONE`. 
+
+Con questi due modelli si potrebbe sviluppare una qualche funzione di perdita. Per esempio si potrebbe valutare l'impatto economico di una mancata risposta o di tempi di attesa troppo lunghi per il cliente, e l'impatto economico invece dell'assunzione di un determinato numero di persone disponibili a rispondere. Con questa funzione di perdita e con l'incertezza sui flussi e sui tempi di evasione adeguatamente modellati è possibile applicare metodologie teoretico-decisionali per determinare il numero di persone addette alla risposta che minimizza la perdita media.
+
