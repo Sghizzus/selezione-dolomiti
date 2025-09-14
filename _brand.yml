@@ -1,0 +1,35 @@
+meta:
+  name: Dolomiti Energia
+  link: https://www.dolomitienergia.it
+
+logo: 
+  images:
+    icon: 
+      path: logos/icon.jpeg
+    full: 
+      path: logos/logo.svg
+  small: icon
+  medium: full
+  large: full
+
+color:
+  palette:
+    matisse: "#1F6B8D"
+    firefly: "#0F2B37"
+    twilight_blue: "#F1FFFF"
+  foreground: firefly        # Testo principale (scuro su sfondo chiaro)
+  background: twilight_blue  # Sfondo principale
+  primary: matisse           # Colore di accento per link, pulsanti, ecc.
+  secondary: firefly         # Colore secondario/scuro per elementi di contrasto
+  light: white               # Colore chiaro per testi su sfondi scuri
+  dark: firefly              # Colore scuro per testi su sfondi chiari
+  info: matisse              # Può coincidere con primary se non c’è un azzurro distinto
+  success: "#4CAF50"         # Verde standard (non definito nel brand, aggiunto per semantica)
+  warning: "#FF9800"         # Arancio standard (idem come sopra)
+  danger: "#E53935"
+
+typography:
+  fonts:
+    - family: Nunito
+      source: google
+  base: Nunito

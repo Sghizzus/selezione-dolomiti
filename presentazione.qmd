@@ -16,6 +16,7 @@ embed-resources: true
 knitr:
     opts_chunk:
         out-width: 70%
+        dev: ragg_png
 ---
 
 ```{r}
@@ -29,6 +30,14 @@ library(DBI)
 library(duckdb)
 library(bayestestR)
 library(mirai)
+library(thematic)
+library(ragg)
+library(bslib)
+library(quarto)
+
+bs_global_theme()
+thematic_on(font = "auto")
+theme_set(theme_minimal())
 ```
 
 ```{r}
@@ -299,10 +308,11 @@ baked_data <- baked_data |>
   })
 
 baked_data |>
+  head(10) |> 
   gt() |>
   fmt_number(t:y) |>
-  opt_stylize() |>
-  opt_interactive()
+  theme_brand_gt("_brand.yml")() |> 
+  opt_table_font(font = "Nunito")
 ```
 
 ::: callout-warning
@@ -522,7 +532,7 @@ pred |>
   geom_line(
     data = ~ . |> filter(t < ymd("2024-10-08")),
     aes(y = pred, group = str_c(giorno_della_settimana, codifica)),
-    color = "#3366FF",
+    color = bs_get_variables(bs_global_theme(), "primary"),
     linewidth = 1
   ) +
   facet_grid(codifica ~ giorno_della_settimana) +
@@ -549,7 +559,7 @@ La previsione sembra seguire abbastanza bene l'andamento complessivo dei dati ma
 
 # Come sfruttare il modello {.smaller}
 
-Una volta ottenuto un modello soddisfacentte per le chiamate in ingresso si può passare a modellare i tempi di evasione della chiamata. Nel dataset fornito c'è la colonna `Durata conversazione` che potrebbe essere utile a questo scopo, differenziando potenzialmente l'analisi tra i diversi valori di `GESTIONE`. 
-
-Con questi due modelli si potrebbe sviluppare una qualche funzione di perdita. Per esempio si potrebbe valutare l'impatto economico di una mancata risposta o di tempi di attesa troppo lunghi per il cliente, e l'impatto economico invece dell'assunzione di un determinato numero di persone disponibili a rispondere. Con questa funzione di perdita e con l'incertezza sui flussi e sui tempi di evasione adeguatamente modellati è possibile applicare metodologie teoretico-decisionali per determinare il numero di persone addette alla risposta che minimizza la perdita media.
+1. Modellare il tempo di evazione tramite il campo `Durata conversazione`, differenziando potenzialmente l'analisi tra i diversi valori di `GESTIONE`. 
+2. Sviluppare una funzione di perdita che tenga conto dell'impatto economico del personale e della perdita di clienti in base al numero di persone al centralino.
+3. Calcolare il numero di persone che minimizza la perfita media
 
